@@ -1,0 +1,30 @@
+name: Backfill Critical Dependabot Alerts to Slack
+on:
+  workflow_dispatch: # run manually
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send old critical alerts to Slack
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+          curl -s -H "Authorization: Bearer $GH_TOKEN" \
+               -H "Accept: application/vnd.github+json" \
+               https://api.github.com/repos/carousell/ct-web-payment-dashboard/dependabot/alerts \
+          | jq -c '.[] | select(.severity=="critical")' \
+          | while read -r alert; do
+              package=$(echo "$alert" | jq -r '.dependency.package.name')
+              summary=$(echo "$alert" | jq -r '.security_advisory.summary')
+              url=$(echo "$alert" | jq -r '.html_url')
+              payload=$(jq -n \
+                --arg package "$package" \
+                --arg summary "$summary" \
+                --arg url "$url" \
+                '{text: "🚨 *Critical Dependabot Alert*\n*Package:* \($package)\n*Issue:* \($summary)\n<\($url)|View Alert>"}')
+              curl -X POST -H 'Content-type: application/json' \
+                   --data "$payload" "$WEBHOOK_URL"
+            done
