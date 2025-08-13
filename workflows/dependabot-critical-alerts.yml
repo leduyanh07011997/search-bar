@@ -1,0 +1,32 @@
+name: Critical Dependabot Alerts to Slack
+
+on:
+  dependabot_alert:
+    types: [created, reopened]
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send to Slack if severity is critical
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SEVERITY: ${{ github.event.alert.severity }}
+          REPO: ${{ github.repository }}
+          ALERT_URL: ${{ github.event.alert.html_url }}
+          PACKAGE: ${{ github.event.alert.dependency.package.name }}
+          SUMMARY: ${{ github.event.alert.security_advisory.summary }}
+        run: |
+          if [ "$SEVERITY" = "critical" ]; then
+            payload=$(jq -n \
+              --arg repo "$REPO" \
+              --arg package "$PACKAGE" \
+              --arg summary "$SUMMARY" \
+              --arg url "$ALERT_URL" \
+              '{text: "🚨 *Critical Dependabot Alert* in \($repo)\n*Package:* \($package)\n*Issue:* \($summary)\n<\($url)|View Alert>"}')
+            curl -X POST -H 'Content-type: application/json' \
+              --data "$payload" \
+              "$SLACK_WEBHOOK_URL"
+          else
+            echo "Not critical — no Slack alert sent."
+          fi
