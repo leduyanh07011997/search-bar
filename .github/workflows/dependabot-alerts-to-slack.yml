@@ -1,4 +1,4 @@
-name: Dependabot Critical Alerts to Slack
+name: Dependabot High & Critical Alerts to Slack
 
 on:
   workflow_dispatch: # allows manual run (for backfill)
@@ -19,14 +19,16 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           send_to_slack() {
-            package="$1"
-            summary="$2"
-            url="$3"
+            severity="$1"
+            package="$2"
+            summary="$3"
+            url="$4"
             payload=$(jq -n \
+              --arg severity "$severity" \
               --arg package "$package" \
               --arg summary "$summary" \
               --arg url "$url" \
-              '{text: "🚨 *Critical Dependabot Alert*\n*Package:* \($package)\n*Issue:* \($summary)\n<\($url)|View Alert>"}')
+              '{text: "🚨 *\($severity | ascii_upcase) Dependabot Alert*\n*Package:* \($package)\n*Issue:* \($summary)\n<\($url)|View Alert>"}')
             curl -s -X POST -H 'Content-type: application/json' \
                  --data "$payload" "$WEBHOOK_URL"
           }
@@ -34,25 +36,27 @@ jobs:
           if [ "$EVENT_NAME" = "dependabot_alert" ]; then
             # Real-time mode
             severity="${{ github.event.alert.severity }}"
-            if [ "$severity" = "critical" ]; then
+            if [ "$severity" = "high" ] || [ "$severity" = "critical" ]; then
               send_to_slack \
+                "$severity" \
                 "${{ github.event.alert.dependency.package.name }}" \
                 "${{ github.event.alert.security_advisory.summary }}" \
                 "${{ github.event.alert.html_url }}"
             else
-              echo "Alert severity is not critical — skipping."
+              echo "Alert severity is not high or critical — skipping."
             fi
           else
             # Backfill mode (manual run)
-            echo "Fetching all historical critical alerts..."
+            echo "Fetching all historical high & critical alerts..."
             curl -s -H "Authorization: Bearer $GH_TOKEN" \
                  -H "Accept: application/vnd.github+json" \
                  "https://api.github.com/repos/${{ github.repository }}/dependabot/alerts" \
-            | jq -c '.[] | select(.severity=="critical")' \
+            | jq -c '.[] | select(.severity=="high" or .severity=="critical")' \
             | while read -r alert; do
+                severity=$(echo "$alert" | jq -r '.severity')
                 package=$(echo "$alert" | jq -r '.dependency.package.name')
                 summary=$(echo "$alert" | jq -r '.security_advisory.summary')
                 url=$(echo "$alert" | jq -r '.html_url')
-                send_to_slack "$package" "$summary" "$url"
+                send_to_slack "$severity" "$package" "$summary" "$url"
               done
           fi
