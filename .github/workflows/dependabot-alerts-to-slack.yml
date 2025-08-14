@@ -2,8 +2,10 @@ name: Dependabot High & Critical Alerts to Slack
 
 on:
   workflow_dispatch: # allows manual run (for backfill)
-  dependabot_alert:
-    types: [created, reopened] # real-time alerts
+  repository_vulnerability_alert:
+    types: [create] # real-time alerts
+  schedule:
+    - cron: '0 9 * * 1' # Check weekly on Mondays at 9 AM UTC
 
 jobs:
   send-alerts:
@@ -33,18 +35,34 @@ jobs:
                  --data "$payload" "$WEBHOOK_URL"
           }
 
-          if [ "$EVENT_NAME" = "dependabot_alert" ]; then
-            # Real-time mode
-            severity="${{ github.event.alert.severity }}"
-            if [ "$severity" = "high" ] || [ "$severity" = "critical" ]; then
-              send_to_slack \
-                "$severity" \
-                "${{ github.event.alert.dependency.package.name }}" \
-                "${{ github.event.alert.security_advisory.summary }}" \
-                "${{ github.event.alert.html_url }}"
-            else
-              echo "Alert severity is not high or critical — skipping."
-            fi
+          if [ "$EVENT_NAME" = "repository_vulnerability_alert" ]; then
+            # Real-time mode - fetch latest alerts since we can't get event data directly
+            echo "Vulnerability alert triggered - fetching recent high & critical alerts..."
+            curl -s -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/${{ github.repository }}/dependabot/alerts?state=open" \
+            | jq -c '.[] | select(.severity=="high" or .severity=="critical") | select(.created_at > (now - 86400 | strftime("%Y-%m-%dT%H:%M:%SZ")))' \
+            | while read -r alert; do
+                severity=$(echo "$alert" | jq -r '.severity')
+                package=$(echo "$alert" | jq -r '.dependency.package.name')
+                summary=$(echo "$alert" | jq -r '.security_advisory.summary')
+                url=$(echo "$alert" | jq -r '.html_url')
+                send_to_slack "$severity" "$package" "$summary" "$url"
+              done
+          elif [ "$EVENT_NAME" = "schedule" ]; then
+            # Scheduled mode - check for open alerts
+            echo "Scheduled run - checking for open high & critical alerts..."
+            curl -s -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/${{ github.repository }}/dependabot/alerts?state=open" \
+            | jq -c '.[] | select(.severity=="high" or .severity=="critical")' \
+            | while read -r alert; do
+                severity=$(echo "$alert" | jq -r '.severity')
+                package=$(echo "$alert" | jq -r '.dependency.package.name')
+                summary=$(echo "$alert" | jq -r '.security_advisory.summary')
+                url=$(echo "$alert" | jq -r '.html_url')
+                send_to_slack "$severity" "$package" "$summary" "$url"
+              done
           else
             # Backfill mode (manual run)
             echo "Fetching all historical high & critical alerts..."
