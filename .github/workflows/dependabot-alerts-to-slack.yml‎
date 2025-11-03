@@ -1,0 +1,83 @@
+name: Dependabot High & Critical Alerts to Slack
+
+on:
+  workflow_dispatch: # allows manual run (for backfill)
+  schedule:
+    - cron: '0 */6 * * *' # Check every 6 hours for new alerts
+  pull_request:
+    types: [opened]
+    branches: [main]
+
+jobs:
+  send-alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Backfill or handle new alert
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          send_to_slack() {
+            severity="$1"
+            package="$2"
+            summary="$3"
+            url="$4"
+            payload=$(jq -n \
+              --arg severity "$severity" \
+              --arg package "$package" \
+              --arg summary "$summary" \
+              --arg url "$url" \
+              '{text: "🚨 *\($severity | ascii_upcase) Dependabot Alert*\n*Package:* \($package)\n*Issue:* \($summary)\n<\($url)|View Alert>"}')
+            curl -s -X POST -H 'Content-type: application/json' \
+                 --data "$payload" "$WEBHOOK_URL"
+          }
+
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+            # Dependabot PR opened - check for related security alerts
+            echo "Dependabot PR detected - checking for related security alerts..."
+            curl -s -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/${{ github.repository }}/dependabot/alerts?state=open" \
+            | jq -c '.[] | select(.severity=="high" or .severity=="critical")' \
+            | while read -r alert; do
+                severity=$(echo "$alert" | jq -r '.severity')
+                package=$(echo "$alert" | jq -r '.dependency.package.name')
+                summary=$(echo "$alert" | jq -r '.security_advisory.summary')
+                url=$(echo "$alert" | jq -r '.html_url')
+                send_to_slack "$severity" "$package" "$summary" "$url"
+              done
+          elif [ "$EVENT_NAME" = "schedule" ]; then
+            # Scheduled mode - check for recent alerts (last 6 hours)
+            echo "Scheduled run - checking for recent high & critical alerts..."
+            six_hours_ago=$(date -u -d '6 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-6H '+%Y-%m-%dT%H:%M:%SZ')
+            curl -s -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/${{ github.repository }}/dependabot/alerts?state=open" \
+            | jq -c --arg since "$six_hours_ago" '.[] | select(.severity=="high" or .severity=="critical") | select(.created_at > $since)' \
+            | while read -r alert; do
+                severity=$(echo "$alert" | jq -r '.severity')
+                package=$(echo "$alert" | jq -r '.dependency.package.name')
+                summary=$(echo "$alert" | jq -r '.security_advisory.summary')
+                url=$(echo "$alert" | jq -r '.html_url')
+                send_to_slack "$severity" "$package" "$summary" "$url"
+              done
+          else
+            # Backfill mode (manual run)
+            echo "Fetching all historical high & critical alerts..."
+            curl -s -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/${{ github.repository }}/dependabot/alerts" \
+            | jq -c '.[] | select(.severity=="high" or .severity=="critical")' \
+            | while read -r alert; do
+                severity=$(echo "$alert" | jq -r '.severity')
+                package=$(echo "$alert" | jq -r '.dependency.package.name')
+                summary=$(echo "$alert" | jq -r '.security_advisory.summary')
+                url=$(echo "$alert" | jq -r '.html_url')
+                send_to_slack "$severity" "$package" "$summary" "$url"
+              done
+          fi
