@@ -18,16 +18,55 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    permissions:
+      security-events: read
+      contents: read
+
     steps:
 
-      # Latest version available at: https://github.com/kunalnagarco/action-cve/releases
+      - name: Fetch Critical Dependabot Alerts
+        id: fetch_alerts
+        run: |
+          # Fetch only critical severity alerts from GitHub API
+          response=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+                            -H "Accept: application/vnd.github+json" \
+                            "https://api.github.com/repos/${{ github.repository }}/dependabot/alerts?state=open&severity=critical")
+          
+          # Check if we got any critical alerts
+          critical_count=$(echo "$response" | jq '. | length')
+          echo "critical_count=$critical_count" >> $GITHUB_OUTPUT
+          
+          if [ "$critical_count" -gt 0 ]; then
+            echo "$response" > critical_alerts.json
+            echo "has_critical=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_critical=false" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Notify Vulnerabilities
-
-        uses: kunalnagarco/action-cve@v1.7.15
-
-        with:
-
-          token: ${{ secrets.GH_TOKEN }} # This secret need to be created
-
-          slack_webhook: ${{ secrets.SLACK_WEBHOOK_URL }} # This secret need to be created
+      - name: Send Critical Alerts to Slack
+        if: steps.fetch_alerts.outputs.has_critical == 'true'
+        run: |
+          # Format and send critical alerts to Slack
+          alerts=$(cat critical_alerts.json)
+          
+          # Build Slack message payload
+          message="🚨 *Critical Dependabot Alerts Detected*\n\n"
+          
+          echo "$alerts" | jq -r '.[] | 
+            "*Package:* \(.dependency.package.name)\n" +
+            "*Severity:* \(.security_advisory.severity)\n" +
+            "*Summary:* \(.security_advisory.summary)\n" +
+            "*<\(.html_url)|View Alert>*\n\n"' >> alert_message.txt
+          
+          message=$(cat alert_message.txt)
+          
+          payload=$(jq -n \
+            --arg text "$message" \
+            '{text: $text}')
+          
+          curl -X POST -H 'Content-type: application/json' \
+            --data "$payload" \
+            "${{ secrets.SLACK_WEBHOOK_URL }}"
+        
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
