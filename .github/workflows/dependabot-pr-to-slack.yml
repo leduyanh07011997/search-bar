@@ -22,20 +22,66 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    permissions:
+      security-events: read
+      contents: read
+      pull-requests: read
+
     steps:
 
     # Latest version available at: https://github.com/actions/checkout/releases
 
     - uses: actions/checkout@v2.5.0
 
+    - name: Check if PR is for Critical Alert
+      id: check_severity
+      run: |
+        # Fetch all critical alerts first
+        critical_alerts=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+                              -H "Accept: application/vnd.github+json" \
+                              "https://api.github.com/repos/${{ github.repository }}/dependabot/alerts?state=open&severity=critical")
+        
+        critical_count=$(echo "$critical_alerts" | jq '. | length')
+        
+        if [ "$critical_count" -eq 0 ]; then
+          echo "ℹ️ No critical alerts found in repository"
+          echo "is_critical=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # Extract package names from critical alerts
+        critical_packages=$(echo "$critical_alerts" | jq -r '.[].dependency.package.name' | sort -u)
+        
+        # Get PR title and body
+        PR_TITLE="${{ github.event.pull_request.title }}"
+        PR_BODY="${{ github.event.pull_request.body }}"
+        PR_TEXT="$PR_TITLE $PR_BODY"
+        
+        # Check if PR mentions any critical package
+        is_critical=false
+        matched_package=""
+        
+        while IFS= read -r package; do
+          # Check if package name appears in PR title or body
+          if echo "$PR_TEXT" | grep -qi "$package"; then
+            is_critical=true
+            matched_package="$package"
+            break
+          fi
+        done <<< "$critical_packages"
+        
+        if [ "$is_critical" = true ]; then
+          echo "✅ PR addresses critical alert for package: $matched_package"
+          echo "is_critical=true" >> $GITHUB_OUTPUT
+        else
+          echo "ℹ️ PR does not address any critical alerts"
+          echo "is_critical=false" >> $GITHUB_OUTPUT
+        fi
+
     - name: Slack Notification
-
+      if: steps.check_severity.outputs.is_critical == 'true'
       # Latest version available at: https://github.com/kv109/action-ready-for-review/releases
-
       uses: kv109/action-ready-for-review@0.2
-
       env:
-
         SLACK_CHANNEL: dependabot-notifications
-
         SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
